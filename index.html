@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SEC Pick 'Em</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 10px; background: #f4f4f4; color: #333; }
+    header { text-align: center; background: orange; color: white; padding: 10px; }
+    .container { max-width: 800px; margin: auto; }
+    .selectors { display: flex; flex-wrap: wrap; justify-content: space-around; margin: 10px 0; }
+    select, button, input { padding: 8px; margin: 5px; border-radius: 5px; border: 1px solid #ccc; width: 100px; }
+    .game-card { background: white; margin: 10px; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    .game-header { font-weight: bold; font-size: 1.1em; }
+    .pick-row { display: flex; align-items: center; gap: 10px; }
+    .radio { margin-right: 5px; }
+    .stats { text-align: center; font-weight: bold; margin: 15px 0; }
+    .login, .export { margin: 10px; text-align: center; }
+    textarea { width: 100%; height: 80px; margin-top: 5px; }
+    .error { color: red; }
+    @media (max-width: 600px) { 
+      .selectors { flex-direction: column; align-items: center; }
+      select, button, input { width: 90%; }
+      .game-card { margin: 5px; padding: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SEC Pick 'Em</h1>
+  </header>
+  <div class="container">
+    <div id="login" class="login">
+      <input type="email" id="email" placeholder="Email">
+      <input type="password" id="password" placeholder="Password">
+      <button onclick="login()">Login</button>
+      <p id="login-error" class="error"></p>
+    </div>
+    <div id="main" style="display: none;">
+      <div class="selectors">
+        <select id="user-select">
+          <option value="me">Me</option>
+          <option value="dad">Dad</option>
+        </select>
+        <select id="season-select">
+          <option value="2025">2025</option>
+          <option value="2024">2024</option>
+          <option value="2023">2023</option>
+        </select>
+        <select id="week-select"></select>
+        <button onclick="fetchGames()">Refresh</button>
+      </div>
+      <div id="stats" class="stats"></div>
+      <div id="games-list"></div>
+      <div class="export">
+        <button onclick="exportPicks()">Export Picks</button>
+        <button onclick="importPicks()">Import Picks</button>
+        <textarea id="picks-json" placeholder="Paste JSON here for import"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const apiBase = 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard';
+    const secGroup = 8;
+    const powerConfs = [1, 4, 5, 9]; // ACC, Big12, BigTen, Pac12
+    let games = [];
+    let picks = {};
+    let loggedIn = false;
+    let currentUser = '';
+
+    // Populate week options
+    const weekSelect = document.getElementById('week-select');
+    for (let i = 1; i <= 15; i++) {
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = `Week ${i}`;
+      weekSelect.appendChild(opt);
+    }
+    weekSelect.value = 5; // Default
+
+    function login() {
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const error = document.getElementById('login-error');
+      if (!email || !password) {
+        error.textContent = 'Enter email and password';
+        return;
+      }
+      // Simple client-side "login" (store email as user ID)
+      currentUser = email.includes('dad') ? 'dad' : 'me';
+      localStorage.setItem(`login_${email}`, password); // Save for future
+      document.getElementById('login').style.display = 'none';
+      document.getElementById('main').style.display = 'block';
+      document.getElementById('user-select').value = currentUser;
+      loggedIn = true;
+      fetchGames();
+    }
+
+    async function fetchGames() {
+      if (!loggedIn) return;
+      const season = document.getElementById('season-select').value;
+      const week = document.getElementById('week-select').value;
+      document.getElementById('games-list').innerHTML = '<p>Loading...</p>';
+      try {
+        const response = await fetch(`${apiBase}?groups=${secGroup}&season=${season}&week=${week}`);
+        if (!response.ok) throw new Error('Network error');
+        const data = await response.json();
+        games = data.events || [];
+        loadPicks(season, week);
+        renderGames();
+        renderStats();
+      } catch (e) {
+        document.getElementById('games-list').innerHTML = '<p>Error loading games: Try again.</p>';
+      }
+    }
+
+    function loadPicks(season, week) {
+      const key = `picks_${season}_${week}_${currentUser}`;
+      const saved = localStorage.getItem(key);
+      picks = saved ? JSON.parse(saved) : {};
+    }
+
+    function savePick(gameId, pick) {
+      const season = document.getElementById('season-select').value;
+      const week = document.getElementById('week-select').value;
+      picks[gameId] = pick;
+      const key = `picks_${season}_${week}_${currentUser}`;
+      localStorage.setItem(key, JSON.stringify(picks));
+      renderGames();
+      renderStats();
+    }
+
+    function getOtherPick(gameId) {
+      const season = document.getElementById('season-select').value;
+      const week = document.getElementById('week-select').value;
+      const otherUser = currentUser === 'me' ? 'dad' : 'me';
+      const otherKey = `picks_${season}_${week}_${otherUser}`;
+      const otherSaved = localStorage.getItem(otherKey);
+      const otherPicks = otherSaved ? JSON.parse(otherSaved) : {};
+      return otherPicks[gameId];
+    }
+
+    function calculatePickPct(gameId, side) {
+      let count = 0;
+      if (picks[gameId] === side) count++;
+      if (getOtherPick(gameId) === side) count++;
+      return (count / 2 * 100).toFixed(0);
+    }
+
+    function calculatePoints(game, userPick) {
+      const comp = game.competitions[0];
+      const competitors = comp.competitors;
+      const home = competitors.find(c => c.homeAway === 'home') || competitors[1];
+      const away = competitors.find(c => c.homeAway === 'away') || competitors[0];
+      const homeScore = parseInt(home.score) || 0;
+      const awayScore = parseInt(away.score) || 0;
+      const isFinal = comp.status.type.name === 'STATUS_FINAL';
+      if (!isFinal || !userPick) return 0;
+
+      const actualWinner = homeScore > awayScore ? 'home' : (awayScore > homeScore ? 'away' : 'tie');
+      if (actualWinner !== userPick || actualWinner === 'tie') return 0;
+
+      const homeRecord = home.records ? home.records[0].summary : '0-0';
+      const awayRecord = away.records ? away.records[0].summary : '0-0';
+      const homeLosses = parseInt(homeRecord.split('-')[1]) || 0;
+      const awayLosses = parseInt(awayRecord.split('-')[1]) || 0;
+      const homeUndefeated = homeLosses === 0;
+      const awayUndefeated = awayLosses === 0;
+
+      const homeConf = home.team.conferenceId || 8;
+      const awayConf = away.team.conferenceId || 8;
+      const isInConf = homeConf === 8 && awayConf === 8;
+
+      let basePoints = 2; // Blue
+      if (isInConf) basePoints = 6; // Green
+      else if (powerConfs.includes(awayConf)) basePoints = 4; // Red
+
+      const homeRank = home.curatedRank ? home.curatedRank.current : 99;
+      const awayRank = away.curatedRank ? away.curatedRank.current : 99;
+      const bothRanked = homeRank <= 25 && awayRank <= 25;
+      if (bothRanked) {
+        basePoints = isInConf ? 10 : 8; // Yellow/Orange
+        const week = parseInt(document.getElementById('week-select').value);
+        if (week >= 2 && homeUndefeated && awayUndefeated) basePoints = 12; // Purple
+      }
+
+      let total = basePoints;
+      if (actualWinner === 'home') total += 1; // Home advantage
+      return total;
+    }
+
+    function getCategory(game) {
+      const comp = game.competitions[0];
+      const home = comp.competitors.find(c => c.homeAway === 'home') || comp.competitors[1];
+      const away = comp.competitors.find(c => c.homeAway === 'away') || comp.competitors[0];
+      const homeConf = home.team.conferenceId || 8;
+      const awayConf = away.team.conferenceId || 8;
+      const isInConf = homeConf === 8 && awayConf === 8;
+      const homeRank = home.curatedRank ? home.curatedRank.current : 99;
+      const awayRank = away.curatedRank ? away.curatedRank.current : 99;
+      const bothRanked = homeRank <= 25 && awayRank <= 25;
+      const homeRecord = home.records ? home.records[0].summary : '0-0';
+      const awayRecord = away.records ? away.records[0].summary : '0-0';
+      const homeUndefeated = parseInt(homeRecord.split('-')[1]) || 0 === 0;
+      const awayUndefeated = parseInt(awayRecord.split('-')[1]) || 0 === 0;
+      const week = parseInt(document.getElementById('week-select').value);
+
+      if (bothRanked && week >= 2 && homeUndefeated && awayUndefeated) return 'Purple (12)';
+      if (bothRanked) return isInConf ? 'Yellow (10)' : 'Orange (8)';
+      if (isInConf) return 'Green (6)';
+      if (powerConfs.includes(awayConf)) return 'Red (4)';
+      return 'Blue (2)';
+    }
+
+    function getOdds(game) {
+      const odds = game.competitions[0].odds;
+      if (!odds || !odds.length) return 'No odds available';
+      const ml = odds[0].details || {};
+      const awayML = ml.awayTeamOdds?.moneyLine || 0;
+      const homeML = ml.homeTeamOdds?.moneyLine || 0;
+      const impliedProb = (ml) => {
+        if (ml < 0) return Math.round((-ml) / (-ml + 100) * 100);
+        return Math.round(100 / (ml + 100) * 100);
+      };
+      return `Away: ${awayML} (${impliedProb(awayML)}%) | Home: ${homeML} (${impliedProb(homeML)}%)`;
+    }
+
+    function renderGames() {
+      const container = document.getElementById('games-list');
+      container.innerHTML = '';
+      games.forEach(game => {
+        const gameId = game.id;
+        const comp = game.competitions[0];
+        const home = comp.competitors.find(c => c.homeAway === 'home') || comp.competitors[1];
+        const away = comp.competitors.find(c => c.homeAway === 'away') || comp.competitors[0];
+        const homeTeam = home.team.displayName;
+        const awayTeam = away.team.displayName;
+        const homeScore = home.score || '?';
+        const awayScore = away.score || '?';
+        const status = comp.status.type.shortDetail;
+        const isFinal = comp.status.type.name === 'STATUS_FINAL';
+        const userPick = picks[gameId];
+        const points = calculatePoints(game, userPick);
+        const category = getCategory(game);
+        const odds = getOdds(game);
+        const homePct = calculatePickPct(gameId, 'home');
+        const awayPct = calculatePickPct(gameId, 'away');
+
+        const card = document.createElement('div');
+        card.className = 'game-card';
+        card.innerHTML = `
+          <div class="game-header">${game.name}</div>
+          <div>Category: ${category}</div>
+          <div>Odds: ${odds}</div>
+          <div>${awayTeam}: ${awayScore} (${awayPct}% picked)</div>
+          <div>${homeTeam}: ${homeScore} (${homePct}% picked)</div>
+          <div>Status: ${status}</div>
+          ${!isFinal ? `
+            <div class="pick-row">
+              <label><input type="radio" class="radio" name="pick_${gameId}" value="away" ${userPick === 'away' ? 'checked' : ''} onchange="savePick('${gameId}', 'away')">${awayTeam}</label>
+              <label><input type="radio" class="radio" name="pick_${gameId}" value="home" ${userPick === 'home' ? 'checked' : ''} onchange="savePick('${gameId}', 'home')">${homeTeam}</label>
+            </div>
+          ` : `<div>Earned: ${points} pts</div>`}
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function renderStats() {
+      let totalPoints = 0;
+      let correct = 0;
+      let teamStats = {};
+      games.forEach(game => {
+        const points = calculatePoints(game, picks[game.id]);
+        totalPoints += points;
+        if (points > 0) correct++;
+        const comp = game.competitions[0];
+        const home = comp.competitors.find(c => c.homeAway === 'home') || comp.competitors[1];
+        const away = comp.competitors.find(c => c.homeAway === 'away') || comp.competitors[0];
+        const homeTeam = home.team.displayName;
+        const awayTeam = away.team.displayName;
+        const userPick = picks[game.id];
+        const homeScore = parseInt(home.score) || 0;
+        const awayScore = parseInt(away.score) || 0;
+        const isFinal = comp.status.type.name === 'STATUS_FINAL';
+        if (isFinal) {
+          [homeTeam, awayTeam].forEach(team => {
+            if (!teamStats[team]) teamStats[team] = { picks: 0, correct: 0 };
+            if (picks[game.id]) teamStats[team].picks++;
+            if (userPick === 'home' && homeScore > awayScore && team === homeTeam) teamStats[team].correct++;
+            if (userPick === 'away' && awayScore > homeScore && team === awayTeam) teamStats[team].correct++;
+          });
+        }
+      });
+      const accuracy = games.length ? (correct / games.length * 100).toFixed(0) : 0;
+      let statsHtml = `Points: ${totalPoints} | Accuracy: ${accuracy}%`;
+      statsHtml += '<br>Team Pick Accuracy:<br>';
+      for (const team in teamStats) {
+        const pct = teamStats[team].picks ? (teamStats[team].correct / teamStats[team].picks * 100).toFixed(0) : 0;
+        statsHtml += `${team}: ${pct}% (${teamStats[team].correct}/${teamStats[team].picks})<br>`;
+      }
+      document.getElementById('stats').innerHTML = statsHtml;
+    }
+
+    function exportPicks() {
+      const allPicks = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key.startsWith('picks_')) {
+          allPicks[key] = localStorage.getItem(key);
+        }
+      }
+      document.getElementById('picks-json').value = JSON.stringify(allPicks);
+    }
+
+    function importPicks() {
+      const json = document.getElementById('picks-json').value;
+      try {
+        const imported = JSON.parse(json);
+        for (const key in imported) {
+          if (key.startsWith('picks_')) {
+            localStorage.setItem(key, imported[key]);
+          }
+        }
+        fetchGames();
+      } catch (e) {
+        alert('Invalid JSON');
+      }
+    }
+  </script>
+</body>
+</html>
